@@ -29,6 +29,106 @@ sudo ls -al /var/log/containers
 
 <img src="../../images/logging-with-sidecar-agent.png">
 
+### How to install fluent bit
+1. Create namespace named `amazon-cloudwatch`
+```shell
+kubectl apply -f https://raw.githubusercontent.com/aws-samples/amazon-cloudwatch-container-insights/latest/k8s-deployment-manifest-templates/deployment-mode/daemonset/container-insights-monitoring/cloudwatch-namespace.yaml
+```
+2. Creat ConfigMap named `cluster-info'
+```shell
+ClusterName=cluster-name
+RegionName=cluster-region
+FluentBitHttpPort='2020'
+FluentBitReadFromHead='Off'
+[[ ${FluentBitReadFromHead} = 'On' ]] && FluentBitReadFromTail='Off'|| FluentBitReadFromTail='On'
+[[ -z ${FluentBitHttpPort} ]] && FluentBitHttpServer='Off' || FluentBitHttpServer='On'
+kubectl create configmap fluent-bit-cluster-info \
+--from-literal=cluster.name=${ClusterName} \
+--from-literal=http.server=${FluentBitHttpServer} \
+--from-literal=http.port=${FluentBitHttpPort} \
+--from-literal=read.head=${FluentBitReadFromHead} \
+--from-literal=read.tail=${FluentBitReadFromTail} \
+--from-literal=logs.region=${RegionName} -n amazon-cloudwatch
+```
+3. Donwload and deploye the fluentbit daemonset
+```shell
+kubectl apply -f https://raw.githubusercontent.com/aws-samples/amazon-cloudwatch-container-insights/latest/k8s-deployment-manifest-templates/deployment-mode/daemonset/container-insights-monitoring/fluent-bit/fluent-bit.yaml
+kubectl get pods -n amazon-cloudwatch
+```
+4. Create IAM role
+```shell
+cat << EOF > assume-role-policy.json
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Principal": {
+                "Service": "pods.eks.amazonaws.com"
+            },
+            "Action": [
+                "sts:AssumeRole",
+                "sts:TagSession"
+            ]
+        }
+    ]
+}
+EOF
+
+cat << EOF > cloudwatch-policy.json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents",
+        "logs:DescribeLogStreams"
+      ],
+      "Resource": "arn:aws:logs:*:*:*"
+    }
+  ]
+}
+EOF
+
+aws iam create-policy \
+  --policy-name CloudWatchPermission \
+  --policy-document file://cloudwatch-policy.json
+  
+APP_ROLE_NAME="fluentbit-role"
+
+aws iam create-role \
+  --role-name $APP_ROLE_NAME \
+  --assume-role-policy-document file://assume-role-policy.json
+  
+CLOUDWATCH_POLICY_ARN=$(aws iam list-policies --query 'Policies[?PolicyName==`CloudWatchPermission`].Arn' --output text)
+APP_ROLE_ARN=$(aws iam get-role --role-name $APP_ROLE_NAME --query 'Role.Arn' --output text)
+
+aws iam attach-role-policy \
+  --policy-arn $CLOUDWATCH_POLICY_ARN \
+  --role-name $APP_ROLE_NAME
+```
+
+5. Create pod identity association
+```shell
+EKS_CLUSTER_NAME="[YOUR_CLUSTER_NAME]"
+APP_ROLE_ARN=$(aws iam get-role --role-name $APP_ROLE_NAME --query 'Role.Arn' --output text)
+APP_NAMESPACE="amazon-cloudwatch"
+SERVICE_ACCOUNT="fluent-bit"
+
+aws eks create-pod-identity-association \
+  --cluster-name $EKS_CLUSTER_NAME \
+  --role-arn $APP_ROLE_ARN \
+  --namespace $APP_NAMESPACE \
+  --service-account $SERVICE_ACCOUNT
+```
+6. Restart fluentbit daemonset
+```shell
+kubectl rollout restart daemonset fluent-bit -n amazon-cloudwatch
+```
+
 ### Using Fluent Bit
 * Fluent Bit은 다양한 소스에서 데이터와 로그를 수집하고 필터로 보강한 후, CloudWatch, Kinesis Data Firehose, Kinesis Data Streams, OpenSearch  등 여러 대상에 전송할 수 있는 경량 로그 처리 및 전송기
 * AWS for Fluent Bit 이미지는 Amazon ECR Public Gallery에서도 제공
@@ -103,3 +203,6 @@ kubectl logs -n ui deployment/ui
 ```
 <img src="../../images/logging-10.webp">
 <img src="../../images/logging-11.webp">
+
+## References
+* [Fluent Bit를 DaemonSet로 설정하여 CloudWatch Logs에 로그 전송](https://docs.aws.amazon.com/ko_kr/AmazonCloudWatch/latest/monitoring/Container-Insights-setup-logs-FluentBit.html)
